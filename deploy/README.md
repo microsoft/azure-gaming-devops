@@ -1,5 +1,9 @@
 # Sample deployment pipeline using deploy.yml
 
+1. Change default parameter values as necessary.
+2. Provide values for each input variable.
+3. Create GitHub Service connection to read `deploy.yml`
+
 ```yml
 name: '0.0.$(Rev:r)'
 
@@ -22,11 +26,11 @@ parameters:
 
 # Provide values for each input variable.
 variables:
-  ContainerRegistryName : ''
-  ContainerRegistryRoot : ''
-  HelmChartName         : ''
-  helmNamespace         : ''
-  helmArguments         : '--create-namespace --debug'
+  ContainerRegistryName : 'sampleRegisteryName'
+  ContainerRegistryRoot : 'oci://sampleRegisteryName.azurecr.io/helm'
+  HelmChartName         : 'sample-helm-chart'
+  helmNamespace         : 'helm-namespace'
+  helmArguments         : '--create-namespace --debug --set config.image.repository=sampleRegisteryName.azurecr.io/container/storageapp'
 
 resources:
   repositories:
