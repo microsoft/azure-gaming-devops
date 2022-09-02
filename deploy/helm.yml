@@ -1,0 +1,161 @@
+parameters:
+  ClusterName           : 'helm-cluster'
+  ResourceGroup         : 'HelmDeploy'
+  ResourceGroupMRGSuffix: 'mrg'
+  ContainerRegistryName : ''
+  ContainerRegistryRoot : ''
+  Location              : 'eastus2'
+  HelmChartName         : 'helm-chart'
+  azureSubscription     : ''
+  subscriptionId        : ''
+  valueFile             : '$(System.DefaultWorkingDirectory)/values.yml'
+  agentPoolCount        : 3
+  helmNamespace         : ''
+  helmArguments         : '--create-namespace --debug' # Set addition arguments here with  --set arg=value
+  vmImage               : ubuntu-latest
+
+stages:
+- stage: Deploy
+  jobs:
+  - job: deploy
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    steps:
+    - task: AzureResourceManagerTemplateDeployment@3
+      displayName: 'Deploy Azure Application'
+      inputs:
+        azureResourceManagerConnection: ${{ parameters.azureSubscription }}
+        subscriptionId                : ${{ parameters.subscriptionId }}
+        resourceGroupName             : ${{ parameters.ResourceGroup }}
+        location                      : ${{ parameters.Location }}
+        csmFile                       : '$(System.DefaultWorkingDirectory)/main.bicep'
+        overrideParameters            : '-name ${{ parameters.ClusterName }} -managedResourceGroupName ${{ parameters.ResourceGroupMRGSuffix }} -location ${{ parameters.Location }} -agentPoolCount ${{ parameters.agentPoolCount }}'
+
+    - task: AzureCLI@2
+      displayName: 'Helm - enable OIDC issuer'
+      env:
+        MY_CLUSTER: ${{ parameters.ClusterName }}
+        MY_RG     : ${{ parameters.ResourceGroup}}-${{ parameters.ResourceGroupMRGSuffix}}
+      inputs:
+        azureSubscription: ${{ parameters.azureSubscription }}
+        scriptType       : bash
+        scriptLocation   : inlineScript
+        inlineScript     : |  
+          echo '##[section]Horde Storage - enable OIDC issuer'
+
+          echo '##[command]az extension add --name aks-preview && az extension update --name aks-preview'
+          az extension add \
+            --name aks-preview \
+          && az extension update \
+            --name aks-preview || exit 1
+
+          echo '##[command]az aks update -n $MY_CLUSTER -g $MY_RG --enable-oidc-issuer'
+          az aks update -n $MY_CLUSTER -g $MY_RG --enable-oidc-issuer || exit 1
+
+          echo '##[command]ISSUER_URL=$(az aks show -n $MY_CLUSTER -g $MY_RG --query "oidcIssuerProfile.issuerUrl" -otsv)'
+          ISSUER_URL=$(az aks show -n $MY_CLUSTER -g $MY_RG --query "oidcIssuerProfile.issuerUrl" -otsv)
+          echo "##[debug]Run the following command to create federated credential:"
+          echo "##[debug]az rest --method POST --uri 'https://graph.microsoft.com/beta/applications/{app_id}/federatedIdentityCredentials' --body '{\"name\":\"$MY_CLUSTER\",\"issuer\":\"$ISSUER_URL\",\"subject\":\"system:serviceaccount:horde-tests:workload-identity-sa\",\"description\":\"For use by Horde Storage app on pipeline test cluster \",\"audiences\":[\"api://AzureADTokenExchange\"]}'"
+
+- stage: Helm
+  dependsOn: Deploy
+  jobs:
+  - job: helm
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    steps:
+    - task: HelmInstaller@0
+      displayName: 'Install Helm 3.6.3'
+      inputs:
+        helmVersion       : 3.6.3
+        kubectlVersion    : 1.10.3
+        checkLatestKubectl: false
+
+    - task: AzureCLI@2
+      displayName: 'Helm - login registry'
+      env:
+        PUBLIC_IP     : ${{ parameters.ClusterName }}-public-ip
+        RESOURCE_GROUP: ${{ parameters.ResourceGroup}}-${{ parameters.ResourceGroupMRGSuffix}}
+        MY_ACR        : ${{ parameters.ContainerRegistryName}}
+      inputs:
+        azureSubscription: ${{ parameters.azureSubscription }}
+        scriptType       : bash
+        scriptLocation   : inlineScript
+        inlineScript     : |  
+          echo "##[section]Azure - get static IP"
+          echo "##[command]az network public-ip show --resource-group $RESOURCE_GROUP --name $PUBLIC_IP --output tsv"
+          az network public-ip show \
+            --resource-group $RESOURCE_GROUP \
+            --name $PUBLIC_IP \
+            --output tsv || exit 1
+
+          echo '##[command]STATIC_IP=$(az network public-ip show --resource-group $RESOURCE_GROUP --name $PUBLIC_IP --output tsv --query ipAddress)'
+          STATIC_IP=$(az network public-ip show --resource-group $RESOURCE_GROUP --name $PUBLIC_IP --output tsv --query ipAddress)
+          echo "##vso[task.setvariable variable=StaticIP;isSecret=false;]$STATIC_IP"
+
+          echo '##[section]Helm - login registry'
+          echo '##[command]PASSWORD=$(az acr login --name $MY_ACR --expose-token --output tsv --query accessToken)'
+          PASSWORD=$(az acr login --name $MY_ACR --expose-token --output tsv --query accessToken)
+
+          echo '##[command]helm registry login'
+          helm registry login \
+            --username "00000000-0000-0000-0000-000000000000" \
+            --password $PASSWORD \
+            $MY_ACR.azurecr.io || exit 1
+
+          echo '##[section]Helm - update repos'
+          echo '##[command]helm repo add csi-secrets-store-provider-azure'
+          helm repo add csi-secrets-store-provider-azure https://azure.github.io/secrets-store-csi-driver-provider-azure/charts || exit 1
+
+    - task: HelmDeploy@0
+      displayName: 'Helm - install workload identity system'
+      inputs:
+        connectionType    : 'Azure Resource Manager'
+        namespace         : 'azure-workload-identity-system'
+        releaseName       : 'workload-identity-webhook'
+        chartName         : '${{ parameters.ContainerRegistryRoot }}/tc-workload-identity'
+        azureSubscription : ${{ parameters.azureSubscription }}
+        azureResourceGroup: ${{ parameters.ResourceGroup}}-${{ parameters.ResourceGroupMRGSuffix}}
+        kubernetesCluster : ${{ parameters.ClusterName }}
+        command           : upgrade
+        arguments         : '--create-namespace --debug'        
+
+    - task: HelmDeploy@0
+      displayName: 'Helm - install tc secrets store provider'
+      inputs:
+        connectionType    : 'Azure Resource Manager'
+        namespace         : 'kube-system'
+        releaseName       : 'csi-azure'
+        chartName         : '${{ parameters.ContainerRegistryRoot }}/tc-secrets-store-provider'        
+        azureSubscription : ${{ parameters.azureSubscription }}
+        azureResourceGroup: ${{ parameters.ResourceGroup}}-${{ parameters.ResourceGroupMRGSuffix}}
+        kubernetesCluster : ${{ parameters.ClusterName }}
+        command           : upgrade
+        arguments         : '--create-namespace --debug'
+
+    - task: HelmDeploy@0
+      displayName: 'Helm - install ingress nginx'
+      inputs:
+        connectionType    : 'Azure Resource Manager'
+        namespace         : 'ingress-basic'
+        releaseName       : 'nginx-ingress'
+        chartName         : '${{ parameters.ContainerRegistryRoot }}/tc-ingress-nginx'        
+        azureSubscription : ${{ parameters.azureSubscription }}
+        azureResourceGroup: ${{ parameters.ResourceGroup}}-${{ parameters.ResourceGroupMRGSuffix}}
+        kubernetesCluster : ${{ parameters.ClusterName }}
+        command           : upgrade
+        arguments         : '--create-namespace --debug --set ingress-nginx.controller.service.loadBalancerIP=$(StaticIP) --set ingress-nginx.controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-resource-group"="${{ parameters.ResourceGroup}}-${{ parameters.ResourceGroupMRGSuffix}}" '        
+
+    - task: HelmDeploy@0
+      displayName: 'Helm - install umbrella chart'
+      inputs:
+        connectionType    : 'Azure Resource Manager'
+        namespace         : ${{ parameters.helmNamespace }}
+        releaseName       : 'tc-umbrella'
+        chartName         : '${{ parameters.ContainerRegistryRoot }}/${{ parameters.HelmChartName }}'
+        valueFile         : ${{ parameters.valueFile }}
+        azureSubscription : ${{ parameters.azureSubscription }}
+        azureResourceGroup: ${{ parameters.ResourceGroup}}-${{ parameters.ResourceGroupMRGSuffix}}
+        kubernetesCluster : ${{ parameters.ClusterName }}
+        command           : upgrade
+        arguments         : ${{ parameters.helmArguments }}
