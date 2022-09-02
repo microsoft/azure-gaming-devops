@@ -13,6 +13,7 @@ parameters:
   helmNamespace         : ''
   helmArguments         : '--create-namespace --debug' # Set addition arguments here with  --set arg=value
   vmImage               : ubuntu-latest
+  keyVault              : ''
 
 stages:
 - stage: Deploy
@@ -36,6 +37,7 @@ stages:
       env:
         MY_CLUSTER: ${{ parameters.ClusterName }}
         MY_RG     : ${{ parameters.ResourceGroup}}-${{ parameters.ResourceGroupMRGSuffix}}
+        MY_KV     : ${{ parameters.keyVault }}
       inputs:
         azureSubscription: ${{ parameters.azureSubscription }}
         scriptType       : bash
@@ -51,6 +53,13 @@ stages:
 
           echo '##[command]az aks update -n $MY_CLUSTER -g $MY_RG --enable-oidc-issuer'
           az aks update -n $MY_CLUSTER -g $MY_RG --enable-oidc-issuer || exit 1
+
+          aksObject=$(az aks show -g myResourceGroup -n myManagedCluster --query "identity")
+          az keyvault set-policy \
+            --name $MY_KV \
+            --object-id $aksObject \
+            --secret-permissions get \
+            --certificate-permissions get
 
           echo '##[command]ISSUER_URL=$(az aks show -n $MY_CLUSTER -g $MY_RG --query "oidcIssuerProfile.issuerUrl" -otsv)'
           ISSUER_URL=$(az aks show -n $MY_CLUSTER -g $MY_RG --query "oidcIssuerProfile.issuerUrl" -otsv)
