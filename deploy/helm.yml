@@ -167,4 +167,4 @@ stages:
         azureResourceGroup: ${{ parameters.ResourceGroup}}-${{ parameters.ResourceGroupMRGSuffix}}
         kubernetesCluster : ${{ parameters.ClusterName }}
         command           : upgrade
-        arguments         : '--create-namespace --debug --set horde-storage.config.image.repository=tchordestoragecontainerregistry.azurecr.io/tcunrealhorde/storageapp'
+        arguments         : ${{ parameters.helmArguments }}
