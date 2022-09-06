@@ -1,0 +1,140 @@
+parameters:
+  arm_params        : ""
+  managed_app       : $(APP_DIR)
+  PACKAGE_VERSION   : $(Build.BuildNumber)
+  region            : $(REGION_1)
+
+steps:
+- task: AzureCLI@2
+  inputs:
+    azureSubscription   : $(AZURE_CONNECTION)
+    scriptType          : bash
+    scriptLocation      : inlineScript
+    failOnStandardError : false
+    addSpnToEnvironment : true
+    inlineScript: |
+      apt install jq --yes
+
+      cd "$(System.DefaultWorkingDirectory)/azure/" || exit 1
+      cd ${{ parameters.managed_app }} || exit 1
+
+      echo "tenant_id: \"${AZURE_TENANT_ID}\"" >> config.yml
+      echo "azure_preview_subscription: \"${SUBSCRIPTION_ID}\"" >> config.yml
+      echo "aad_id: \"${AAD_ID}\"" >> config.yml
+      echo "aad_secret: \"${AAD_SECRET}\"" >> config.yml
+      echo "access_id: \"${ACCESS_ID}\"" >> config.yml
+
+      echo "Building ARM..."
+      BICEP="./app_contents/mainTemplate.bicep"
+      rm -f "./app_contents/mainTemplate.json"
+      az bicep build -f $BICEP --outfile "./app_contents/mainTemplate.json"
+
+      pip install azure-mgmt-resource==10.0.0
+
+      sed -ri 's/"(product|offer)":[ ]*"([A-Za-z0-9]|-|_)*/&-preview/' ./app_contents/mainTemplate.json
+
+      cd app_contents || exit 1
+
+      sas_token=$(az storage container generate-sas --account-key ${AZURE_STORAGE_KEY} --account-name ${AZURE_STORAGE_ACCOUNT} --expiry 2022-01-01 --name mmlspark --permissions r)
+
+      suffix=$RANDOM
+      echo "##vso[task.setvariable variable=Suffix;]$suffix"
+      
+      WEBAPP_NAME="devopswebapp$suffix"
+
+      sed -ri "s/\"\*\*sastoken\*\*\"/$sas_token/" ${{ parameters.arm_params }}
+      sed -ri "s/\*\*aadappid\*\*/${AZURE_CLIENT_ID}/" ${{ parameters.arm_params }}
+      sed -ri "s/\*\*aadapppassword\*\*/${AZURE_CLIENT_SECRET}/" ${{ parameters.arm_params }}
+      sed -ri "s/\*\*webapp\*\*/${WEBAPP_NAME}/" ${{ parameters.arm_params }}
+      sed -ri "s/\*\*storageaccount\*\*/devopsteststg$suffix/" ${{ parameters.arm_params }}
+      sed -ri "s/\*\*PACKAGE_VERSION\*\*/${PACKAGE_VERSION}/" ${{ parameters.arm_params }}
+      sed -ri "s/\*\*rg\*\*/devops-test-$suffix/" ${{ parameters.arm_params }}
+
+      sed -ri "s/GEN-SERVICE-PRINCIPAL-APPID/${AZURE_CLIENT_ID}/" ${{ parameters.arm_params }}
+      sed -ri "s/GEN-SERVICE-PRINCIPAL-SECRET/${AZURE_CLIENT_SECRET}/" ${{ parameters.arm_params }}
+
+      cat ${{ parameters.arm_params }}
+
+      az group create \
+        -n devops-test-$suffix \
+        -l ${{ parameters.region }}
+
+      az storage account create \
+        -n devopsteststg$suffix \
+        -g devops-test-$suffix
+      
+      result=$(az storage account show-connection-string -g devops-test-$suffix -n devopsteststg$suffix)
+      connection_string=$(echo $result | jq .connectionString)
+
+      az storage container create \
+        -n retailidmsampledata \
+        --account-name devopsteststg$suffix \
+        --connection-string $connection_string
+
+
+      publisher=$(cat mainTemplate.json | jq -r .variables.environments.production.vmImage.publisher)
+      offer=$(cat mainTemplate.json | jq -r .variables.environments.production.vmImage.offer)
+      sku=$(cat ${{ parameters.arm_params }} | jq -r '(.parameters.osType.value + "_" + .parameters.gameEngine.value) | sub("ue";"unreal";"i")')
+
+      echo "Publisher: $publisher | Offer: $offer | SKU: $sku"
+      az vm image terms accept \
+        --publisher $publisher \
+        --offer $offer \
+        --plan $sku
+
+      result=$(az deployment group create \
+          --name devops-test-$suffix \
+          --template-file mainTemplate.json \
+          --parameters ${{ parameters.arm_params }} \
+          --resource-group devops-test-$suffix 2>&1)
+
+      echo "##[debug] The ARM template completed with result: $result"
+
+      if grep -q "\"error\":{\"code\"" <<< "${result,,}"
+      then        
+        echo "##vso[task.logissue type=error] Deployment failed!"
+        echo "##[debug] $result"
+        exit 1
+      elif grep -q "error: missing input parameters" <<< "${result,,}"
+      then
+        echo "##vso[task.logissue type=error] Deployment failed due to missing input Parameters!"
+        echo "##[debug] $result"
+        exit 1
+      elif grep -q "error: {\"status\": \"canceled\"}" <<< "${result,,}"
+      then
+        echo "##vso[task.logissue type=error] Deployment failed! Operation Canceled!"
+        echo "##[debug] $result"
+        exit 1
+      elif grep -q "error: [errno 2] No such file or directory" <<< "${result,,}"
+      then
+        echo "##vso[task.logissue type=error] Deployment failed! Missing Template! Did bicep conversion fail?"
+        echo ##[debug] $result"
+        exit 1        
+      elif grep -q "error: unable to parse parameter" <<< "${result,,}"
+      then
+        echo "##vso[task.logissue type=error] Deployment failed! Unable to parse parameter"
+        echo "##[debug] $result"
+        exit 1
+      elif grep -q "error:parameter" <<< "${result,,}"
+      then
+        echo "##vso[task.logissue type=error]Deployment failed!"
+        echo "##[debug] $result"
+        exit 1
+      elif grep -q "error:" <<< "${result,,}"
+      then
+        echo "##vso[task.logissue type=error] Deployment failed!"
+        echo "##[debug] $result"
+        exit 1
+      fi
+
+  displayName: 'ARM Validation'
+  env:
+    AZURE_CLIENT_ID      : $(AAD_ID)
+    AZURE_CLIENT_SECRET  : $(AAD_SECRET)
+    ACCESS_ID            : $(ACCESS_ID)
+    SUBSCRIPTION_ID      : $(SUBSCRIPTION_ID)
+    AZURE_TENANT_ID      : $(TENANT_ID)
+    SSH_PUB_KEY          : $(SSH_PUB_KEY)
+    AZURE_STORAGE_ACCOUNT: $(AZURE_STORAGE_ACCOUNT)
+    AZURE_STORAGE_KEY    : $(AZURE_STORAGE_KEY)
+    PACKAGE_VERSION      : ${{ parameters.PACKAGE_VERSION }}
