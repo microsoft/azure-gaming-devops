@@ -14,7 +14,7 @@ stages:
       ob_outputDirectory: '$(Build.SourcesDirectory)/out'
       ob_git_checkout   : false
     steps:
-    - template: gaming_image_setup.yml@microsoftai
+    - template: gaming_image_setup.yml
 
 - ${{ each image in parameters.images }}:
   - stage: ${{ image }}_Packer
@@ -33,7 +33,7 @@ stages:
         ob_outputDirectory: '$(Build.SourcesDirectory)/out'
         ob_artifactSuffix : $(engine)
       steps:
-      - template: packer_image_build.yml@microsoftai
+      - template: packer_image_build.yml
         parameters:
             root                  : 'azure/game-dev-vm/packer'
             image                 : ${{ image }}
@@ -46,7 +46,7 @@ stages:
     - ${{ each image in parameters.images }}:
       - ${{ image }}_Packer
   jobs:
-  - template: stage_marketplace_image.yml@microsoftai
+  - template: stage_marketplace_image.yml
     parameters: 
       root          : 'azure/game-dev-vm/packer'
       storageAccount: $(STORAGE_ACCOUNT)
