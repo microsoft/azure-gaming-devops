@@ -1,0 +1,165 @@
+parameters:
+  root               : '.'
+  project            : one
+  storageAccount     : deps4industrialgaming
+  resourceGroup      : gamingImageInfraEast
+  listing_config     : 'vm_listing_config.json'
+  publisherId        : $(publisherId)
+  offerName          : dcib_vm_test_2
+  publishOffer       : false
+  LinuxContainerImage: onebranch.azurecr.io/linux/ubuntu-1804:latest
+
+jobs:
+- job: marketplace_publish
+  pool:
+    type: linux
+  variables:
+    ob_outputDirectory: '$(Build.SourcesDirectory)/out'
+    LinuxContainerImage: ${{ parameters.LinuxContainerImage }}
+  steps:
+  - task: AzureCLI@1
+    displayName: 'Prod_Deploy'
+    name: 'Prod_Deploy'
+    timeoutInMinutes: 60
+    env:
+      AZURE_STORAGE_ACCOUNT : $(AZURE_STORAGE_ACCOUNT)
+      AZURE_STORAGE_KEY     : $(AZURE_STORAGE_KEY)
+      TENANT_ID             : $(TENANT_ID)
+      PROD_ID               : $(PROD_ID)
+      PROD_SECRET           : $(PROD_SECRET)
+      SUBSCRIPTION_ID       : $(SUBSCRIPTION_ID)
+      storageAccount        : ${{ parameters.storageAccount }}
+      resourceGroup         : ${{ parameters.resourceGroup }}
+      ROOT                  : ${{ parameters.root }}
+      listing_config        : ${{ parameters.listing_config }}
+      smallLogo             : $(smallLogo)
+      mediumLogo            : $(mediumLogo)
+      largeLogo             : $(largeLogo)
+      wideLogo              : $(wideLogo)
+      heroLogo              : $(heroLogo)
+      publisherId           : ${{ parameters.publisherId }}
+      imageOfferId          : $(imageOfferId)
+      IMAGE_VERSION         : $(Build.BuildNumber)
+    inputs:
+      azureSubscription: $(AZURE_CONNECTION)
+      scriptType       : 'bash'
+      scriptLocation   : 'inlineScript'
+      inlineScript     : |
+          apt-get update >/dev/null 2>&1 \
+          && apt-get install jq --yes >/dev/null 2>&1 || exit 1
+
+          cd $ROOT || exit 1
+
+          az login --service-principal --tenant $TENANT_ID -u $PROD_ID -p $PROD_SECRET \
+          && az account set -s $SUBSCRIPTION_ID || exit 1
+
+          accountKey=$(az storage account keys list -g $resourceGroup -n $storageAccount | jq .[0].value) || exit 1
+          osDisksContainer="system"
+          dataDisksContainer="datadisks"
+
+          sed -ri "s/<publisherId>/$publisherId/" $listing_config \
+          && sed -ri "s/<offerId>/$imageOfferId/" $listing_config \
+          && sed -ri "s,<smallLogo>,${smallLogo//&/\\&}," $listing_config \
+          && sed -ri "s,<mediumLogo>,${mediumLogo//&/\\&}," $listing_config \
+          && sed -ri "s,<largeLogo>,${largeLogo//&/\\&}," $listing_config \
+          && sed -ri "s,<wideLogo>,${wideLogo//&/\\&}," $listing_config \
+          && sed -ri "s,<heroLogo>,${heroLogo//&/\\&}," $listing_config || exit 1
+
+          end=`date -u -d "11520 minutes" '+%Y-%m-%dT%H:%MZ'`
+          outputOSSas=`az storage container generate-sas --only-show-errors --account-name $storageAccount --account-key $accountKey --name $osDisksContainer --permissions dlrw --expiry $end -o tsv` || exit 1
+          outputDataSas=`az storage container generate-sas --only-show-errors --account-name $storageAccount --account-key $accountKey --name $dataDisksContainer --permissions dlrw --expiry $end -o tsv` || exit 1
+
+          listing=$(<$listing_config)
+
+          while read -r versionsListFile <&3; do
+            planBaseName=${versionsListFile/_versions.txt/}
+            plansTemplateFile="${planBaseName}_plans.json"
+
+            sed -i '$a\' $versionsListFile
+            while read -r planVersion <&4; do                
+              plansVersionFile=${plansTemplateFile/./-$planVersion.}
+              planSuffix=${planVersion//./_}
+
+              osVhdPrefix=$planBaseName
+              osVhdPrefix=${osVhdPrefix/unity/unity_${planVersion:0:8}}
+
+              vhdWin10Name=$(az storage blob list \
+              --account-name $storageAccount \
+              --account-key $accountKey \
+              -c $osDisksContainer \
+              --prefix "Microsoft.Compute/Images/images/win10$osVhdPrefix" \
+              --query "max_by([? contains(name, '-osDisk') && ends_with(name, '.vhd')], &properties.lastModified).name" -o tsv) || exit 1
+              vhdWin10Url="https://$storageAccount.blob.core.windows.net/$osDisksContainer/$vhdWin10Name?$outputOSSas"
+
+              vhdWS2019Name=$(az storage blob list \
+              --account-name $storageAccount \
+              --account-key $accountKey \
+              -c $osDisksContainer \
+              --prefix "Microsoft.Compute/Images/images/ws2019$osVhdPrefix" \
+              --query "max_by([? contains(name, '-osDisk') && ends_with(name, '.vhd')], &properties.lastModified).name" -o tsv) || exit 1
+              vhdWS2019Url="https://$storageAccount.blob.core.windows.net/$osDisksContainer/$vhdWS2019Name?$outputOSSas"
+
+              dataVhdVersionName=$(az storage blob list \
+              --account-name $storageAccount \
+              --account-key $accountKey \
+              -c $dataDisksContainer \
+              --prefix "disk-$planBaseName-$planVersion" \
+              --query "max_by([? ends_with(name, '.vhd')], &properties.lastModified).name" -o tsv) || exit 1
+              dataVhdVersionUrl="https://$storageAccount.blob.core.windows.net/$dataDisksContainer/$dataVhdVersionName?$outputDataSas"
+
+              cp $plansTemplateFile $plansVersionFile
+
+              sed -ri "s,<${planBaseName}_plan_suffix>,${planSuffix}," $plansVersionFile
+              sed -ri "s,<${planBaseName}_version>,${planVersion}," $plansVersionFile
+              sed -ri "s,<win10${planBaseName}>,${vhdWin10Url//&/\\&}," $plansVersionFile
+              sed -ri "s,<ws2019${planBaseName}>,${vhdWS2019Url//&/\\&}," $plansVersionFile
+              sed -ri "s,<disk_${planBaseName}_version>,${dataVhdVersionUrl//&/\\&}," $plansVersionFile
+              
+              plans=$(<$plansVersionFile)
+              listing="${listing//<plans>/$plans,<plans>}"
+              
+            done 4< <(cat $versionsListFile)
+          done 3< <(ls *_versions.txt)
+
+          listing="${listing//,<plans>/}"
+
+          echo $listing | jq '.' > $listing_config
+          sed -ri "s/0.0.0/$IMAGE_VERSION/" $listing_config
+
+          cat $listing_config
+  - task: AzureCLI@1
+    displayName: 'Marketplace_Update'
+    name: 'Marketplace_Update'
+    timeoutInMinutes: 60
+    env:
+      AAD_ID                : $(AAD_ID)
+      AAD_SECRET            : $(AAD_SECRET)
+      ACCESS_ID             : $(ACCESS_ID)
+      TENANT_ID             : $(TENANT_ID)
+      SUBSCRIPTION_ID       : $(SUBSCRIPTION_ID)
+      ROOT                  : ${{ parameters.root }}
+      listing_config        : ${{ parameters.listing_config }}
+    inputs:
+      azureSubscription: $(AZURE_CONNECTION)
+      scriptType       : 'bash'
+      scriptLocation   : 'inlineScript'
+      inlineScript     : |
+          python3.7 -m pip install "az-partner-center-cli" >/dev/null 2>&1 || exit 1
+
+          cd $ROOT || exit 1
+
+          echo "tenant_id: \"${TENANT_ID}\"" >> config.yml
+          echo "azure_preview_subscription: \"${SUBSCRIPTION_ID}\"" >> config.yml
+          echo "aad_id: \"${AAD_ID}\"" >> config.yml
+          echo "aad_secret: \"${AAD_SECRET}\"" >> config.yml
+          echo "access_id: \"${ACCESS_ID}\"" >> config.yml
+
+          echo "##[command]azpc vm update --name ${{ parameters.offerName }} --config-json $listing_config"
+          azpc vm update --name "${{ parameters.offerName }}" --config-json $listing_config || exit 1
+
+          if [ "${{ parameters.publishOffer }}" == "True" ]; then
+            sleep 1m
+            echo "##[command]azpc vm publish --name "${{ parameters.offerName }}" --notification-emails "emilve@microsoft.com" --config-json $listing_config"
+            azpc vm publish --name "${{ parameters.offerName }}" --notification-emails "emilve@microsoft.com" --config-json $listing_config || exit 1
+            echo "Marketplace offer queued for publishing"
+          fi

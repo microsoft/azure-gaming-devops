@@ -1,0 +1,26 @@
+parameters:
+  arm_params  : []
+  publishAMA  : false
+  publishAST  : true
+  publishOffer: false
+
+stages:
+- template: stage_arm_ttk.yml
+  parameters:
+    arm_params: ${{ parameters.arm_params }}
+
+- template: stages_arm_deployment.yml
+  parameters:
+    arm_params: ${{ parameters.arm_params }}
+
+- ${{ if eq(parameters.publishAST, true) }}:
+  - template: stage_marketplace_app.yml
+    parameters:
+      publishOffer: ${{ parameters.publishOffer }}
+
+- ${{ if eq(parameters.publishAMA, true) }}:
+  - template: stage_marketplace_app.yml
+    parameters:
+      application: ma
+      publishOffer: ${{ parameters.publishOffer }}
+      

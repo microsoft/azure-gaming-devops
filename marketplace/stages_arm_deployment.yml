@@ -1,0 +1,31 @@
+parameters:
+  arm_params: [mainTemplate.parameters.json]
+
+stages:
+- ${{ each value in parameters.arm_params}}:
+  - stage: ${{ replace(value,'.','_')}}_FunctionalTestingARM
+    jobs:
+    - job: ${{ replace(value,'.','_')}}_e2e_arm_template
+      timeoutInMinutes: 60
+      pool:
+        type: linux
+      variables:
+        ob_outputDirectory : '$(Build.SourcesDirectory)/${{ value }}/out'
+        LinuxContainerImage: onebranch.azurecr.io/linux/ubuntu-1804:latest
+      steps:
+      - template: arm_deploy.yml
+        parameters:
+          arm_params: ${{ value }}
+
+      - template: arm_testing.yml
+
+      - task       : AzureCLI@2
+        condition  : succeededOrFailed()
+        displayName: 'ARM Cleanup'
+        inputs:
+          azureSubscription: $(AZURE_CONNECTION)
+          scriptType       : bash
+          scriptLocation   : inlineScript
+          displayName      : 'ARM Cleanup'
+          inlineScript     : |
+            az group delete -n devops-test-$(Suffix) --no-wait --yes

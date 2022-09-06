@@ -1,0 +1,122 @@
+parameters:
+  storageAccount   : $(STORAGE_ACCOUNT)
+  resourceGroup    : $(STORAGE_ACCOUNT_RESOURCE_GROUP)
+
+steps:
+  - task            : AzureCLI@1
+    displayName     : 'Prod_Deploy'
+    name            : 'Prod_Deploy'
+    timeoutInMinutes: 60
+    env:
+      AAD_ID                    : $(PROD_ID)
+      AAD_SECRET                : $(PROD_SECRET)
+      ACCESS_ID                 : $(ACCESS_ID)
+      SUBSCRIPTION_ID           : $(SUBSCRIPTION_ID)
+      TENANT_ID                 : $(TENANT_ID)
+      AZURE_STORAGE_ACCOUNT     : $(AZURE_STORAGE_ACCOUNT)
+      AZURE_STORAGE_KEY         : $(AZURE_STORAGE_KEY)
+      AZCOPY_TENANT_ID          : $(TENANT_ID)
+      AZCOPY_SPA_APPLICATION_ID : $(PROD_ID)
+      AZCOPY_SPA_CLIENT_SECRET  : $(PROD_SECRET)
+      UNREAL_SOURCE_URL         : $(UNREAL_SOURCE_URL)
+      UNREAL_PXSTREAM_SOURCE_URL: $(UNREAL_PXSTREAM_SOURCE_URL)
+    inputs:
+      azureSubscription: $(AZURE_CONNECTION)
+      scriptType       : 'bash'
+      scriptLocation   : 'inlineScript'
+      inlineScript     : |
+        apt update >/dev/null 2>&1 || exit 1
+        apt install jq --yes >/dev/null 2>&1 || exit 1
+
+        wget https://aka.ms/downloadazcopy-v10-linux
+        tar -xvf downloadazcopy-v10-linux
+        cp azcopy*/azcopy .
+
+        echo "Tenant ID       : $(TENANT_ID)"
+        echo "Subscription ID : $(SUBSCRIPTION_ID)"
+
+        az login --service-principal --tenant $(TENANT_ID) -u $(PROD_ID) -p $(PROD_SECRET)
+        az account set -s $(SUBSCRIPTION_ID)
+
+        location=eastus
+        resourceGroup="${{ parameters.resourceGroup }}"
+        storageAccount="${{ parameters.storageAccount }}"
+        artifactContainer="artifacts"
+        dataDisksContainer="datadisks"
+
+        az group list --query [].[name] --output yamlc
+        for row in $(az group list --query [].[name] --output tsv | grep win10); do az group delete --yes --no-wait --name $row; done
+        for row in $(az group list --query [].[name] --output tsv | grep ws2019); do az group delete --yes --no-wait --name $row; done
+        for row in $(az group list --query [].[name] --output tsv | grep unity); do az group delete --yes --no-wait --name $row; done
+        for row in $(az group list --query [].[name] --output tsv | grep unreal); do az group delete --yes --no-wait --name $row; done
+
+        az group show \
+            --name $resourceGroup 2>/dev/null \
+        || az group create \
+            --name $resourceGroup \
+            --location $location \
+        || exit 1
+
+        az storage account show \
+            --name $storageAccount \
+            --resource-group $resourceGroup 2>/dev/null \
+        || az storage account create \
+            --name $storageAccount \
+            --resource-group $resourceGroup \
+        || exit 1
+
+        accountKey=$(az storage account keys list -g $resourceGroup -n $storageAccount | jq .[0].value)
+
+        az storage container show \
+            --only-show-errors \
+            --account-name $storageAccount \
+            --account-key $accountKey \
+            --name $artifactContainer 2>/dev/null \
+        || az storage container create \
+            --only-show-errors \
+            --account-name $storageAccount \
+            --account-key $accountKey \
+            --name $artifactContainer \
+        || exit 1
+
+        az storage container show \
+            --only-show-errors \
+            --account-name $storageAccount \
+            --account-key $accountKey \
+            --name $dataDisksContainer 2>/dev/null \
+        || az storage container create \
+            --only-show-errors \
+            --account-name $storageAccount \
+            --account-key $accountKey \
+            --name $dataDisksContainer \
+        || exit 1
+
+        az vm list --query [].[name] --output yamlc
+  - template: ./az_copy_linux.yml
+    parameters:
+      resourceGroup : gamingImageInfraEast
+      storageAccount: ${{ parameters.storageAccount }}
+      SOURCE_URL    : $(UNREAL_SOURCE_URL)
+      FILE_NAME     : UnrealPackage-4.27.zip
+
+  - template: ./az_copy_linux.yml
+    parameters:
+      resourceGroup : gamingImageInfraEast
+      storageAccount: ${{ parameters.storageAccount }}
+      SOURCE_URL    : $(UNREAL5_SOURCE_URL)
+      FILE_NAME     : UnrealPackage-5.0.zip      
+
+  - template: ./az_copy_linux.yml
+    parameters:
+      resourceGroup : gamingImageInfraEast
+      storageAccount: ${{ parameters.storageAccount }}
+      SOURCE_URL    : $(UNREAL_PXSTREAM_SOURCE_URL)
+      FILE_NAME     : SignallingWebServer.zip
+
+  - template: ./az_copy_linux.yml
+    parameters:
+      resourceGroup     : gamingImageInfraEast
+      storageAccount    : ${{ parameters.storageAccount }}
+      artifactContainer : datadisks
+      SOURCE_URL        : $(DATA_DISKS_CONTAINER_SOURCE_URL)
+      FILE_NAME         : 

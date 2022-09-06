@@ -1,0 +1,36 @@
+parameters:
+  root                  : '.'
+  artifactStorageAccount: 'industrialgaming'
+  image                 : 'win10'
+  engine                : 'unity_2020_3_19f1'
+  vm_size               : Standard_NV12s_v3
+
+steps:
+- task: AzureCLI@2
+  inputs:
+    azureSubscription  : $(AZURE_CONNECTION)
+    scriptType         : 'batch'
+    scriptLocation     : 'inlineScript'
+    addSpnToEnvironment: true'
+    inlineScript       : |
+      choco install -y packer
+
+      echo %BUILD_BUILDNUMBER%
+      set /A runNumber=%BUILD_BUILDNUMBER:.=-%
+
+      set engine=${{ parameters.engine }}
+
+      call az login --service-principal --tenant $(TENANT_ID) -u $(PROD_ID) -p $(PROD_SECRET)
+      call az account set -s $(SUBSCRIPTION_ID)
+
+      SetLocal EnableDelayedExpansion
+      for /f "usebackq" %%A in (`powershell -NoP -C "(Get-Date).ToUniversalTime().AddHours(-6).ToString('yyyy-MM-ddTHH:mm')"`) do (set beforeDate=%%A && for /f "usebackq" %%i in (`az resource list --query "[?type=='Microsoft.Compute/virtualMachines' && starts_with(resourceGroup,'${{ parameters.image }}%engine:~0,5%') && createdTime < '!beforeDate!'].{resourceGroup:resourceGroup}" -o tsv`) do (az group delete -n %%i --yes))
+
+      for /f "usebackq tokens=1* delims=: " %%A in (`nslookup myip.opendns.com. resolver1.opendns.com 2^>NUL^|find "Address:"`) do (set ExternalIP=%%B)
+      set ExternalIP
+
+      set PACKER_LOG=1
+      cd ${{ parameters.root }}
+
+      7z a .\PreInstall.zip ..\app_contents\PreInstall\*.* -r
+      call packer build -var-file="windows/variables.${{ parameters.image }}.pkrvar.hcl" -var "dlink_teradici=$(dlink_teradici)" -var ExternalIP=%ExternalIP% -var artifact_storage_account=${{ parameters.artifactStorageAccount }} -var vm_size=${{ parameters.vm_size }} -var temp_resource_group_name=${{ parameters.image }}%engine:~0,14%%runNumber% -var temp_compute_name=${{ parameters.image }}%engine:~5,5%%runNumber% --only=azure-arm.${{ parameters.engine }} windows
