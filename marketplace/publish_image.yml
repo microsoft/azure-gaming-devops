@@ -1,0 +1,56 @@
+parameters:
+    images             : ''
+    engines            : ''
+    parallelBuildsPerOS: 2
+    publishOffer       : false
+
+stages:
+- stage: ProdSetup
+  jobs:
+  - job: prod_setup
+    pool:
+      type: linux
+    variables:
+      ob_outputDirectory: '$(Build.SourcesDirectory)/out'
+      ob_git_checkout   : false
+    steps:
+    - template: gaming_image_setup.yml@microsoftai
+
+- ${{ each image in parameters.images }}:
+  - stage: ${{ image }}_Packer
+    dependsOn: [ProdSetup]
+    jobs:
+    - job: Engine
+      strategy:
+        maxParallel: ${{ parameters.parallelBuildsPerOS }}
+        matrix:
+          ${{ each engine in parameters.engines }}:
+            ${{ engine }}:
+              engine: ${{ engine }}
+      pool:
+        type: windows
+      variables:
+        ob_outputDirectory: '$(Build.SourcesDirectory)/out'
+        ob_artifactSuffix : $(engine)
+      steps:
+      - template: packer_image_build.yml@microsoftai
+        parameters:
+            root                  : 'azure/game-dev-vm/packer'
+            image                 : ${{ image }}
+            engine                : $(engine)
+            vm_size               : $(BUILD_VM_SIZE)
+            artifactStorageAccount: $(STORAGE_ACCOUNT)
+
+- stage: vmPublish
+  dependsOn: 
+    - ${{ each image in parameters.images }}:
+      - ${{ image }}_Packer
+  jobs:
+  - template: stage_marketplace_image.yml@microsoftai
+    parameters: 
+      root          : 'azure/game-dev-vm/packer'
+      storageAccount: $(STORAGE_ACCOUNT)
+      resourceGroup : $(STORAGE_ACCOUNT_RESOURCE_GROUP)
+      listing_config: 'vm_listing_config.json'
+      offerName     : $(imageOfferId)
+      publishOffer  : ${{ parameters.publishOffer }}

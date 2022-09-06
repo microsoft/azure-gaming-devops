@@ -1,0 +1,64 @@
+parameters:
+  storageAccount: deps4industrialgaming
+  SOURCE_URL: ''
+  FILE_NAME: 'SignallingWebServer.zip'
+  artifactContainer: artifacts
+  resourceGroup: gamingImageInfraEast
+
+steps:
+  - task: AzureCLI@1
+    displayName: 'azCopy'
+    timeoutInMinutes: 60
+    env:
+      SUBSCRIPTION_ID: $(SUBSCRIPTION_ID)
+      TENANT_ID: $(TENANT_ID)
+      AZURE_STORAGE_ACCOUNT: $(AZURE_STORAGE_ACCOUNT)
+      AZURE_STORAGE_KEY: $(AZURE_STORAGE_KEY)
+      AZCOPY_TENANT_ID: $(TENANT_ID)
+      AZCOPY_SPA_APPLICATION_ID: $(PROD_ID)
+      AZCOPY_SPA_CLIENT_SECRET: $(PROD_SECRET)
+    inputs:
+      azureSubscription: 'AG-CI-AI-Canary_Enabled'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        echo 'copying file to destintation'
+
+        az login --service-principal --tenant $(TENANT_ID) -u $(PROD_ID) -p $(PROD_SECRET)
+
+        az account set -s $(SUBSCRIPTION_ID)
+
+        inputUrl="${{ parameters.SOURCE_URL }}"
+        storageAccount=${{parameters.storageAccount}}
+        artifactContainer=${{parameters.artifactContainer}}
+        resourceGroup=${{parameters.resourceGroup}}
+        accountKey=$(az storage account keys list -g $resourceGroup -n $storageAccount | jq .[0].value)
+        fileName="/${{ parameters.FILE_NAME }}"
+
+        end=`date -u -d "30 minutes" '+%Y-%m-%dT%H:%MZ'`
+        outputSas=`az storage container generate-sas --only-show-errors --account-name $storageAccount --account-key $accountKey --name $artifactContainer --permissions dlrw --expiry $end -o tsv`
+        outputUrl="https://$storageAccount.blob.core.windows.net/$artifactContainer/${{ parameters.FILE_NAME }}?$outputSas"
+        outputUrl=${outputUrl/\/\?/\?}
+
+        echo $inputUrl
+        echo $outputUrl
+
+        if [ -z "$inputUrl" ]; then
+            echo "No Input URL"
+            exit 1
+        fi
+
+        status=$(az storage blob show \
+            --only-show-errors \
+            --account-name $storageAccount \
+            --container-name  $artifactContainer \
+            --account-key $accountKey \
+            --name ${{ parameters.FILE_NAME }} 2>/dev/null \
+        || ./azcopy copy $inputUrl $outputUrl --overwrite=ifSourceNewer)
+
+        if grep -q "failed to perform" <<< "${status,,}"
+        then
+            echo "Failed to upload files to Azure Storage"
+            exit 1
+        fi
+        echo 'az copy complete'
