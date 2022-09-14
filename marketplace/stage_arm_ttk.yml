@@ -35,10 +35,6 @@ stages:
 
                 Invoke-WebRequest -Uri aka.ms/arm-ttk-marketplace -OutFile arm-template-toolkit.zip
                 Expand-Archive -LiteralPath arm-template-toolkit.zip -DestinationPath arm-ttk
-                
-                Invoke-WebRequest -URI "https://raw.githubusercontent.com/bmoore-msft/arm-ttk/81d88f1a1ddf3be5747633302efa989786c90839/arm-ttk/testcases/deploymentTemplate/IDs-Should-Be-Derived-From-ResourceIDs.test.ps1" -OutFile .\IDs-Should-Be-Derived-From-ResourceIDs.test.ps1
-                mv .\IDs-Should-Be-Derived-From-ResourceIDs.test.ps1 .\arm-ttk\arm-ttk\testcases\deploymentTemplate\ -Force
-
 
                 Import-Module .\arm-ttk\arm-ttk\arm-ttk.psd1
 
