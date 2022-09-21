@@ -73,7 +73,7 @@ stages:
           cp ${{parameters.managed_app}}.zip $(Build.SourcesDirectory)/out/
 
           echo "##[command]python3.7 -m pip install --upgrade az-partner-center-cli"
-          python3.7 -m pip install --upgrade az-partner-center-cli==0.0.36 >/dev/null 2>&1 || exit 1
+          python3.7 -m pip install --upgrade az-partner-center-cli>=0.0.36 >/dev/null 2>&1 || exit 1
 
           echo "##[command]azpc ${{ parameters.application }} create --update --name ${{ parameters.managed_app_name }}"
           azpc ${{ parameters.application }} create \
